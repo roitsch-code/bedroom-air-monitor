@@ -1,0 +1,9 @@
+# Local secrets — copied from config.example.h and filled with your Wi-Fi / URLs
+firmware/*/config.h
+
+# Arduino build artifacts
+build/
+*.bin
+*.elf
+*.hex
+.DS_Store
