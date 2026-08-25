@@ -72,15 +72,20 @@ void handleNow() {
 
 // ── Sensors ──────────────────────────────────────────────────────────────────
 void startSensors() {
-  Wire.begin();
+  // On the QT Py ESP32-S2 the STEMMA QT connector is Wire1 (SDA1=41, SCL1=40), NOT the default
+  // Wire (which is the castellated side pads). Using Wire here leaves the sensors powered but
+  // silent — a green LED with no I2C. The pins must be set explicitly on this board.
+  Wire1.setPins(SDA1, SCL1);
+  Wire1.begin();
 
-  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
+  scd4x.begin(Wire1, SCD41_I2C_ADDR_62);
   scd4x.stopPeriodicMeasurement();                 // clean state after a reset
+  delay(500);                                       // the SCD4x needs ~500 ms before it will start
   scd4x.setAutomaticSelfCalibrationEnabled(CO2_AUTO_CALIBRATION);
   scd4x.setTemperatureOffset(CO2_TEMP_OFFSET_C);
   scd4x.startPeriodicMeasurement();                // a reading roughly every 5 s, silent
 
-  sen5x.begin(Wire);
+  sen5x.begin(Wire1);
   sen5x.deviceReset();
   sen5x.setTemperatureOffsetSimple(0.0f);          // we take temp/RH from the SCD-41, not this one
 #if !SEN54_INTERMITTENT
