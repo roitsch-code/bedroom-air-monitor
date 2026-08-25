@@ -15,12 +15,12 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <SensirionI2CScd4x.h>
-#include <SensirionI2cSen5x.h>
+#include <SensirionI2cScd4x.h>
+#include <SensirionI2CSen5x.h>
 #include "config.h"
 
-SensirionI2CScd4x scd4x;
-SensirionI2cSen5x sen5x;
+SensirionI2cScd4x scd4x;
+SensirionI2CSen5x sen5x;
 WebServer server(80);
 
 // Latest readings. NAN = "not measured", so we never serve a fabricated number.
@@ -74,9 +74,9 @@ void handleNow() {
 void startSensors() {
   Wire.begin();
 
-  scd4x.begin(Wire);
+  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
   scd4x.stopPeriodicMeasurement();                 // clean state after a reset
-  scd4x.setAutomaticSelfCalibration(CO2_AUTO_CALIBRATION);
+  scd4x.setAutomaticSelfCalibrationEnabled(CO2_AUTO_CALIBRATION);
   scd4x.setTemperatureOffset(CO2_TEMP_OFFSET_C);
   scd4x.startPeriodicMeasurement();                // a reading roughly every 5 s, silent
 
@@ -91,7 +91,7 @@ void startSensors() {
 
 void readScd4x() {
   uint16_t co2; float t, rh; bool ready = false;
-  if (scd4x.getDataReadyFlag(ready) != 0 || !ready) return;
+  if (scd4x.getDataReadyStatus(ready) != 0 || !ready) return;
   if (scd4x.readMeasurement(co2, t, rh) != 0) return;
   if (co2 == 0) return;                             // SCD-41 reports 0 for an invalid sample
   latest.co2 = co2; latest.tempC = t; latest.rh = rh; latest.co2Age = millis();
