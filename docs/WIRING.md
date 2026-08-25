@@ -14,12 +14,19 @@ The QT Py and both sensors share one I²C bus. Daisy-chain them in any order:
   └───────────┘   (300 mm)    └─────────┘   (100 mm)  └──────────────┘
 ```
 
-- **QT Py → SCD-41:** one STEMMA QT cable (the 300 mm one is handy here).
-- **SCD-41 → SEN5x adapter:** the second STEMMA QT cable (100 mm is fine).
-- **SEN5x adapter → SEN54:** the SEN54's own ribbon plugs into the adapter board.
+- **QT Py → SCD-41:** one STEMMA QT cable (the 300 mm one is handy here). The QT Py has one STEMMA
+  QT port; the SCD-41 has **two** (they're the same bus, so either is "in" or "out").
+- **SCD-41 → SEN5x adapter:** the second STEMMA QT cable (100 mm is fine), from the SCD-41's free
+  port to the adapter's STEMMA QT port.
+- **SEN5x adapter → SEN54:** the **6-pin JST-GH cable that ships with the SEN54** plugs into the
+  6-pin socket on top of the adapter (not the STEMMA QT side — that's already used).
 
 Both sensors sit at different I²C addresses (SCD-41 at `0x62`, SEN5x at `0x69`), so sharing the bus
-is no problem — no jumpers, no address changes.
+is no problem — no jumpers, no address changes. Every connector is keyed: it only goes in one way,
+so don't force one that resists.
+
+Assemble everything **with USB unplugged**, then plug the USB-C cable in last. The adapter's on-board
+boost generates the 5 V the SEN54's fan needs, so you don't wire power separately.
 
 ## Power
 
