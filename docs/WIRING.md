@@ -18,8 +18,11 @@ The QT Py and both sensors share one I²C bus. Daisy-chain them in any order:
   QT port; the SCD-41 has **two** (they're the same bus, so either is "in" or "out").
 - **SCD-41 → SEN5x adapter:** the second STEMMA QT cable (100 mm is fine), from the SCD-41's free
   port to the adapter's STEMMA QT port.
-- **SEN5x adapter → SEN54:** the **6-pin JST-GH cable that ships with the SEN54** plugs into the
-  6-pin socket on top of the adapter (not the STEMMA QT side — that's already used).
+- **SEN5x adapter → SEN54:** a **6-pin JST-GH cable with a plug on BOTH ends** connects the sensor
+  to the 6-pin socket on top of the adapter (not the STEMMA QT side — that's already used).
+  ⚠️ **This cable is NOT included with either the adapter or the SEN54.** The adapter ships bare,
+  and the cable in the SEN54's box has bare breadboard pins on one end, so it does not plug into the
+  adapter. You need a JST-GH 6-pin **plug-to-plug** cable — e.g. Adafruit #5754. Order it separately.
 
 Both sensors sit at different I²C addresses (SCD-41 at `0x62`, SEN5x at `0x69`), so sharing the bus
 is no problem — no jumpers, no address changes. Every connector is keyed: it only goes in one way,
