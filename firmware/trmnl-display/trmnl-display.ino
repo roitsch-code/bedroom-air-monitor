@@ -10,15 +10,18 @@
 // the middle, four factors (CO₂ / INNEN / DRAUSSEN / FEUCHTE) evenly split across the bottom, one
 // font throughout, no divider line.
 //
-// Libraries (Arduino Library Manager): "Seeed_GFX", "ArduinoJson".
-// Board: "XIAO_ESP32S3_PLUS" (Tools → Board → Seeed XIAO Boards).
+// Libraries: "Seeed_GFX" (Sketch → Include Library → Add .ZIP Library, from
+// github.com/Seeed-Studio/Seeed_GFX), "ArduinoJson" (Library Manager).
+// Board: "XIAO_ESP32S3_PLUS" (Tools → Board → ESP32 Arduino).
 // driver.h in this same sketch folder selects the exact panel — see that file, don't touch it.
+// Seeed_GFX's own header is still called TFT_eSPI.h (it's a fork that kept the original name) —
+// that's not a typo below. EPaper is only declared when driver.h's setup actually enables it.
 //
 // ⚠️ NOT test-flashed by me — I don't have the hardware. If it doesn't compile, paste the exact
 // error and I'll fix only that line, not guess-rewrite the file.
 
 #include "driver.h"
-#include <Seeed_GFX.h>
+#include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -26,7 +29,9 @@
 #include <time.h>
 #include "config.h"
 
-EPaper epaper = EPaper();
+#ifdef EPAPER_ENABLE
+EPaper epaper;
+#endif
 
 // Europe/Berlin, DST-aware (CET winter / CEST summer).
 static const char* TZ_BERLIN = "CET-1CEST,M3.5.0,M10.5.0/3";
@@ -271,9 +276,11 @@ void setup() {
 
   Verdict v = decideAiring(r);
 
+#ifdef EPAPER_ENABLE
   epaper.begin();
   epaper.setRotation(0);
   draw(r, v);
+#endif
 
   sleep();   // deep sleep until the next refresh; setup() runs again on wake
 }
