@@ -6,16 +6,23 @@
 #define WIFI_PASS   "your-password"
 
 // ── Where to fetch the reading from ──────────────────────────────────────────
-// The sensor node's /now endpoint. Use the sensor's FIXED IP from step 1 in the README.
+// The sensor node's /now endpoint. Use the sensor's FIXED IP.
 #define SENSOR_URL  "http://192.168.1.50/now"
 
+// ── Outdoor temperature (Open-Meteo, no key needed) ─────────────────────────
+// Your rough coordinates — this is only used for the outdoor reading, nothing else.
+#define WEATHER_LAT  "51.2277"
+#define WEATHER_LON  "6.7735"
+
 // ── Refresh cadence ──────────────────────────────────────────────────────────
-// How long to deep-sleep between redraws. 10–15 minutes is plenty for air — and kind to the
-// battery, since every wake costs a Wi-Fi connect plus a full e-ink refresh (which flashes).
+// How long between redraws. Every wake costs a Wi-Fi connect + a full e-ink flash, so don't go
+// too low — 10–15 minutes is plenty for air.
 #define REFRESH_MINUTES  12
 
-// ── The airing threshold ─────────────────────────────────────────────────────
-// At or above this CO₂ (ppm), the display says "open the window"; below it, "air is fine".
-// Research puts a measurable sleep effect around 1000 ppm and a clear one around 1400.
-#define CO2_AIR_PPM     1400
-#define CO2_SOFT_PPM    1000   // between SOFT and AIR: "a quick airing wouldn't hurt"
+// ── Airing verdict — PLACEHOLDER thresholds ──────────────────────────────────
+// Markus is designing the real decision (CO₂ + indoor/outdoor temp + humidity together) himself —
+// this is only a stand-in so the display shows something sensible until that's ready. Swap the
+// numbers here, or replace decideAiring() in the .ino once the real rules exist.
+#define CO2_AIR_PPM      1400   // at/above this: window should go, full stop
+#define CO2_SOFT_PPM     1000   // between SOFT and AIR: worth a quick airing
+#define HUMIDITY_HIGH    60     // %RH at/above this: airing hint mentions it regardless of CO₂
