@@ -47,6 +47,13 @@ struct Reading {
   char clock[6] = "--:--";
 };
 
+// The airing verdict. Defined here, right next to Reading, on purpose: the Arduino IDE
+// auto-generates function prototypes near the top of the file, before this struct would be
+// defined if it stayed down near decideAiring() — and a prototype returning an unknown type fails
+// to compile ("'Verdict' does not name a type"). Any type used in a function signature has to be
+// defined up here, above every function.
+struct Verdict { const char* lead; String sub; };
+
 // ── Wi-Fi ────────────────────────────────────────────────────────────────────
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
@@ -119,8 +126,8 @@ void fetchTime(Reading& r) {
 // PLACEHOLDER (see config.h): Markus is designing the real rules himself — this only combines
 // CO₂ + the indoor/outdoor temperature difference + humidity into something sensible until then.
 // Swap the numbers in config.h, or rewrite the body of this one function — nothing else needs to
-// change when the real rules land.
-struct Verdict { const char* lead; String sub; };
+// change when the real rules land. (Verdict itself is defined up top, next to Reading — see the
+// comment there for why.)
 
 Verdict decideAiring(const Reading& r) {
   if (!r.sensorOk || r.co2 < 0) {
