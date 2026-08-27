@@ -4,9 +4,13 @@
 // dimensions marked "verified" come from Adafruit/Sensirion's own specs; anything marked
 // "estimated" is a guess and should be checked against the real part before printing final.
 //
-// Layout, left to right: [ QT Py bay ][ SCD-41 bay, vented front ][ SEN54 module bay, vented front + side ]
-// Two open compartments (no dividing wall to the ceiling — STEMMA QT cables run between bays), one
-// lid. USB-C cable exits the back. SEN54's JST-GH pigtail exits through a slot into its own bay.
+// Layout, left to right: [ QT Py bay ][ SCD-41 bay, vented front ][ SEN54 module + its own STEMMA
+// QT adapter board, vented front + side ]. Two open compartments (no dividing wall to the ceiling
+// — STEMMA QT cables run between bays), one lid. USB-C cable exits the back.
+//
+// The SEN54 module and its small STEMMA QT adapter board (Adafruit #5964) both live in the same
+// bay, wired to each other with the 6-pin JST-GH cable — that cable stays fully internal, it never
+// needs to leave the case.
 
 /* [Part to render] */
 part = "both"; // [base, lid, both]
@@ -34,8 +38,19 @@ scd_clear = 5;
 sen_l = 52.3;
 sen_w = 43.3;
 sen_h = 22.3;
-sen_tail_l = 17;       // mm, JST-GH connector tail sticking out one corner (estimated from drawing)
 sen_clear = 6;         // more clearance: fan needs open air, not a snug fit
+
+/* [SEN5x STEMMA QT adapter board — verified 25.4 x 20.0 x 5.0mm, measured by Markus] */
+adapter_l = 25.4;
+adapter_w = 20.0;
+adapter_h = 5.0;
+adapter_clear = 4;
+
+// End-of-bay space reserved for the module's own connector tab (roughly 17mm per the datasheet's
+// side-view drawing — still an ESTIMATE, the drawing doesn't label that clearly) AND for the
+// adapter board sitting beside it. Whichever needs more room end to end wins; both fit
+// side-by-side across the bay's width, which is wide open back there (see sen_bay_w below).
+sen_tail_l = max(17, adapter_w + adapter_clear);
 
 /* [Derived bay sizes — internal, before walls] */
 qtpy_bay_l = qtpy_l + qtpy_clear;
@@ -128,10 +143,6 @@ module case_base() {
     translate([case_l - 1, wall + sen_bay_w * 0.65, floor + inner_h / 2])
       rotate([0, 90, 0])
         cylinder(h = wall + 2, d = 20, $fn = 36);
-
-    // JST-GH pigtail exit slot, back wall of the SEN54 bay
-    translate([x_sen + 4, -1, floor + inner_h - 6])
-      cube([10, wall + 2, 5]);
   }
 
   // Rebuild the two internal ribs (thin, with a gap near the top for cables to cross over).
@@ -147,6 +158,23 @@ module case_base() {
   // before) so they actually survive. Overlapped 0.2mm into the floor for the same fusing reason.
   for (pos = [[6, 6], [case_l - 6, 6], [6, case_w - 6], [case_l - 6, case_w - 6]])
     translate([pos[0], pos[1], floor - ov]) screw_boss(inner_h - 2 + ov);
+
+  // Adapter board nest: a locating lip on the floor at the far end of the SEN54 bay (beyond the
+  // module's own footprint, away from the rib), sized to the board Markus actually measured.
+  // No mounting holes assumed — this Adafruit breakout's hole pattern isn't published, so it's a
+  // friction-fit nest (open on the side facing the module, for the JST-GH cable) rather than a
+  // screwed mount. Add double-sided tape if it needs to stay put.
+  adapter_x = x_sen + sen_l + sen_clear / 2;
+  adapter_y = wall + (sen_bay_w - adapter_l) / 2;
+  lip = 1.2;
+  translate([adapter_x, adapter_y, floor])
+    difference() {
+      cube([adapter_w + 2 * lip, adapter_l + 2 * lip, lip]);       // outer block
+      translate([lip, lip, -0.5])
+        cube([adapter_w, adapter_l, lip + 1]);                     // hollow out the board footprint
+      translate([-0.5, lip, -0.5])
+        cube([lip + 1, adapter_l, lip + 1]);                       // open one side for the JST-GH cable
+    }
 }
 
 module case_lid() {
