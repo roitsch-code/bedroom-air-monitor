@@ -234,11 +234,11 @@ void draw(const Reading& r, const Verdict& v) {
   epaper.drawString(v.lead, boxX + 32, boxY + 30);
   epaper.setTextSize(1);
 
-  epaper.setTextFont(2);
+  epaper.setTextFont(4);
   String subLines[2];
-  int nLines = wrapText(v.sub, boxW - 64, 2, subLines, 2);
+  int nLines = wrapText(v.sub, boxW - 64, 4, subLines, 2);
   for (int i = 0; i < nLines; i++) {
-    epaper.drawString(subLines[i], boxX + 32, boxY + 128 + i * 26);
+    epaper.drawString(subLines[i], boxX + 32, boxY + 128 + i * 34);
   }
 
   // Footer: six equal columns, each centered, one font, no line above it.
