@@ -126,15 +126,21 @@ void serviceSen54Burst() {
     if (now - latest.pmAge >= (uint32_t)SEN54_BURST_MINUTES * 60000UL || latest.pmAge == 0) {
       // Restore the learned VOC state BEFORE starting — setVocAlgorithmState only takes effect in
       // idle mode and is applied once when the next measurement starts (Sensirion's own docs).
-      if (vocAlgStateValid) sen5x.setVocAlgorithmState(vocAlgState, 8);
+      // Logged, not silently ignored (§9) — a failed restore would look identical to "still
+      // learning" from the outside, and that's exactly the bug we're chasing.
+      if (vocAlgStateValid) {
+        uint16_t err = sen5x.setVocAlgorithmState(vocAlgState, 8);
+        Serial.print("SEN54: VOC state restore -> "); Serial.println(err == 0 ? "ok" : String("ERROR " + String(err)));
+      }
       sen5x.startMeasurement(); sen54Running = true; sen54BurstStart = now;
       Serial.println("SEN54: fan burst started");
     }
   } else if (now - sen54BurstStart >= (uint32_t)SEN54_WARMUP_SECONDS * 1000UL) {
     readSen5x();
     // Save the state BEFORE stopping, so the next burst can resume instead of relearning from 0.
-    sen5x.getVocAlgorithmState(vocAlgState, 8);
-    vocAlgStateValid = true;
+    uint16_t err = sen5x.getVocAlgorithmState(vocAlgState, 8);
+    if (err == 0) vocAlgStateValid = true;
+    Serial.print("SEN54: VOC state save -> "); Serial.println(err == 0 ? "ok" : String("ERROR " + String(err)));
     sen5x.stopMeasurement(); sen54Running = false;
     Serial.println("SEN54: sampled, fan stopped");
   }
