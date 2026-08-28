@@ -6,9 +6,11 @@
 // deep-sleeps for REFRESH_MINUTES. No cloud, no TRMNL servers, no HealthSync server round-trip —
 // it talks straight to the sensor and to Open-Meteo.
 //
-// Layout matches the approved preview exactly: header (room name + clock) on top, the verdict in
-// the middle, four factors (CO₂ / INNEN / DRAUSSEN / FEUCHTE) evenly split across the bottom, one
-// font throughout, no divider line.
+// Layout matches the approved preview: header (room name + clock) on top, the verdict in the
+// middle, six factors (CO₂ / INNEN / DRAUSSEN / FEUCHTE / FEINSTAUB / VOC) evenly split across the
+// bottom, one font throughout, no divider line. FEINSTAUB (PM2.5) and VOC come from the SEN54 —
+// both show "--" until its intermittent fan burst has sampled at least once (see the sensor's own
+// config.h, SEN54_BURST_MINUTES).
 //
 // Libraries: "Seeed_GFX" (Sketch → Include Library → Add .ZIP Library, from
 // github.com/Seeed-Studio/Seeed_GFX), "ArduinoJson" (Library Manager).
@@ -41,6 +43,8 @@ struct Reading {
   bool sensorOk = false;
   int co2 = -1, humidity = -1;
   float indoorTemp = NAN;
+  float pm25 = NAN;   // µg/m³, from the SEN54 — NAN when the fan hasn't sampled yet (intermittent mode)
+  float voc = NAN;    // Sensirion VOC index (unitless, ~100 = normal)
   bool outdoorOk = false;
   float outdoorTemp = NAN;
   bool timeOk = false;
@@ -78,6 +82,8 @@ void fetchSensor(Reading& r) {
       r.co2         = doc["co2"]      | -1;
       r.humidity    = doc["humidity"] | -1;
       r.indoorTemp  = doc["temp"]     | NAN;
+      r.pm25        = doc["pm25"]     | NAN;   // absent while the SEN54 fan hasn't sampled yet
+      r.voc         = doc["voc"]      | NAN;
     }
   } else {
     Serial.print("Sensor GET failed, code "); Serial.println(code);
@@ -235,23 +241,26 @@ void draw(const Reading& r, const Verdict& v) {
     epaper.drawString(subLines[i], boxX + 32, boxY + 128 + i * 26);
   }
 
-  // Footer: four equal columns, each centered, one font, no line above it.
+  // Footer: six equal columns, each centered, one font, no line above it.
   epaper.setTextColor(TFT_BLACK, TFT_WHITE);
   const int footY = boxY + boxH + 40;      // labels
   const int valY  = footY + 26;            // values
-  const int colW = CONTENT_W / 4;
+  const int colCount = 6;
+  const int colW = CONTENT_W / colCount;
 
-  const char* labels[4] = { "CO2", "INNEN", "DRAUSSEN", "FEUCHTE" };
-  String values[4] = {
+  const char* labels[colCount] = { "CO2", "INNEN", "DRAUSSEN", "FEUCHTE", "FEINSTAUB", "VOC" };
+  String values[colCount] = {
     r.sensorOk && r.co2 >= 0 ? String(r.co2) : "--",
     r.sensorOk && !isnan(r.indoorTemp) ? String(r.indoorTemp, 1) : "--",
     r.outdoorOk ? String(r.outdoorTemp, 0) : "--",
     r.sensorOk && r.humidity >= 0 ? String(r.humidity) : "--",
+    !isnan(r.pm25) ? String(r.pm25, 0) : "--",   // "--" until the SEN54's next intermittent burst
+    !isnan(r.voc) ? String(r.voc, 0) : "--",
   };
-  bool hasDegree[4] = { false, true, true, false };
-  const char* suffix[4] = { "", "", "", "%" };
+  bool hasDegree[colCount] = { false, true, true, false, false, false };
+  const char* suffix[colCount] = { "", "", "", "%", "", "" };
 
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < colCount; i++) {
     int centerX = MARGIN + colW * i + colW / 2;
 
     epaper.setTextFont(2);
