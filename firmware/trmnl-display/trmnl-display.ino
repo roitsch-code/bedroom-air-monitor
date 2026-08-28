@@ -47,6 +47,7 @@ struct Reading {
   float voc = NAN;    // Sensirion VOC index (unitless, ~100 = normal)
   bool outdoorOk = false;
   float outdoorTemp = NAN;
+  float outdoorHumidity = NAN;   // %RH — needed so "air it out" isn't suggested when it's raining
   bool timeOk = false;
   char clock[6] = "--:--";
 };
@@ -99,7 +100,7 @@ void fetchOutdoor(Reading& r) {
   HTTPClient http;
   http.setConnectTimeout(8000);
   String url = String("https://api.open-meteo.com/v1/forecast?latitude=") + WEATHER_LAT +
-               "&longitude=" + WEATHER_LON + "&current=temperature_2m";
+               "&longitude=" + WEATHER_LON + "&current=temperature_2m,relative_humidity_2m";
   http.begin(client, url);
   int code = http.GET();
   if (code == 200) {
@@ -108,6 +109,9 @@ void fetchOutdoor(Reading& r) {
       if (doc["current"]["temperature_2m"].is<float>()) {
         r.outdoorTemp = doc["current"]["temperature_2m"].as<float>();
         r.outdoorOk = true;
+      }
+      if (doc["current"]["relative_humidity_2m"].is<float>()) {
+        r.outdoorHumidity = doc["current"]["relative_humidity_2m"].as<float>();
       }
     }
   } else {
@@ -128,34 +132,95 @@ void fetchTime(Reading& r) {
   }
 }
 
+// ── Physics: absolute humidity ───────────────────────────────────────────────
+// Relative humidity alone can't say whether opening a window will dry the room out — warm air
+// holds far more water than cold air, so "90% outside" at 3°C can hold LESS real water than
+// "60% inside" at 22°C. Converting both to absolute humidity (grams of water per m³, Magnus-Tetens
+// approximation) makes the comparison physically correct: it gets a rainy mild day right (outside
+// really is wetter, don't air it out) AND a cold damp winter day right (the cold air is drier in
+// absolute terms, and dries out further once it warms up inside) — a %RH comparison alone cannot
+// get both of those right at the same time.
+float absoluteHumidity(float tempC, float rh) {
+  if (isnan(tempC) || isnan(rh) || rh < 0) return NAN;
+  float satVaporPressure = 6.112f * exp((17.62f * tempC) / (243.12f + tempC));  // hPa
+  return 216.7f * ((rh / 100.0f) * satVaporPressure) / (273.15f + tempC);       // g/m³
+}
+
 // ── The airing verdict ────────────────────────────────────────────────────────
-// PLACEHOLDER (see config.h): Markus is designing the real rules himself — this only combines
-// CO₂ + the indoor/outdoor temperature difference + humidity into something sensible until then.
-// Swap the numbers in config.h, or rewrite the body of this one function — nothing else needs to
-// change when the real rules land. (Verdict itself is defined up top, next to Reading — see the
-// comment there for why.)
+// PLACEHOLDER (see config.h): Markus is designing the real rules himself — this combines CO₂ + VOC
+// + the indoor/outdoor temperature difference + absolute humidity into something sensible until
+// then. Swap the numbers in config.h, or rewrite the body of this one function — nothing else needs
+// to change when the real rules land. (Verdict itself is defined up top, next to Reading.)
 
 Verdict decideAiring(const Reading& r) {
   if (!r.sensorOk || r.co2 < 0) {
     return { "Keine Daten", "Sensor gerade nicht erreichbar." };
   }
 
-  bool outdoorCooler = r.outdoorOk && (r.outdoorTemp < r.indoorTemp - 1.0f);
+  bool co2High = r.co2 >= CO2_AIR_PPM;
+  bool co2Soft = r.co2 >= CO2_SOFT_PPM;
+  bool vocKnown = !isnan(r.voc);
+  bool vocHigh = vocKnown && r.voc >= VOC_AIR;
+  bool vocSoft = vocKnown && r.voc >= VOC_SOFT;
   bool humid = r.humidity >= 0 && r.humidity >= HUMIDITY_HIGH;
+  bool outdoorCooler = r.outdoorOk && (r.outdoorTemp < r.indoorTemp - 1.0f);
+  bool coldOutside = r.outdoorOk && r.outdoorTemp <= COLD_OUTSIDE_C;
 
-  if (r.co2 >= CO2_AIR_PPM) {
-    if (r.outdoorOk && !outdoorCooler && r.outdoorTemp > r.indoorTemp) {
-      String s = "CO2 hoch, aber draussen waermer (" + String(r.outdoorTemp, 0) +
-                 String((char)176) + ") als drinnen. Noch nicht lueften.";
-      return { "Noch warten", s };
+  // The physically correct humidity check — see absoluteHumidity() above.
+  float indoorAbs = absoluteHumidity(r.indoorTemp, r.humidity);
+  float outdoorAbs = r.outdoorOk ? absoluteHumidity(r.outdoorTemp, r.outdoorHumidity) : NAN;
+  bool absHumidityKnown = !isnan(indoorAbs) && !isnan(outdoorAbs);
+  bool outdoorDrier = absHumidityKnown && (outdoorAbs < indoorAbs - HUMIDITY_MARGIN_ABS);
+
+  String burst = coldOutside ? " Kurz stosslueften reicht." : "";
+
+  // 1) Air quality problem — CO2 and/or VOC seriously elevated. Strongest trigger, always wins.
+  if (co2High || vocHigh) {
+    String reason = (co2High && vocHigh) ? "CO2 und VOC beide hoch" : (co2High ? "CO2 hoch" : "VOC hoch");
+
+    if (r.outdoorOk && !outdoorCooler && r.outdoorTemp > r.indoorTemp + 1.0f) {
+      return { "Noch warten", reason + ", aber draussen waermer (" + String(r.outdoorTemp, 0) +
+               String((char)176) + ") als drinnen - erst wenn's draussen kuehler ist." };
     }
-    String s = String("CO2 hoch") + (outdoorCooler ? " - und draussen ist es kuehler. Das lueftet und kuehlt zugleich." : ".");
-    if (humid) s += " Feuchte ebenfalls hoch.";
+    String s = reason + ".";
+    if (outdoorCooler) s += " Draussen ist es kuehler - das lueftet und kuehlt zugleich.";
+    if (humid) {
+      if (!absHumidityKnown) {
+        s += " Feuchte drinnen ebenfalls hoch.";
+      } else if (!outdoorDrier) {
+        s += " Feuchte drinnen auch hoch, aber draussen ist die Luft absolut genauso feucht - das senkt nur CO2/VOC, nicht die Feuchte.";
+      } else {
+        s += " Nebenbei wird's auch trockener drinnen.";
+      }
+    }
+    s += burst;
     return { "Fenster auf", s };
   }
-  if (r.co2 >= CO2_SOFT_PPM || humid) {
-    String s = humid ? "Luftfeuchtigkeit ueber " + String(HUMIDITY_HIGH) + "% - kurz stosslueften."
-                      : "CO2 leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+
+  // 2) Humid indoors, but airing wouldn't actually help right now — the case that started this:
+  //    raining outside, indoor humidity high, opening the window would only import more moisture.
+  if (humid && absHumidityKnown && !outdoorDrier) {
+    String s = "Feuchte drinnen " + String(r.humidity) +
+               "% - draussen ist die Luft absolut genauso feucht oder feuchter, lueften wuerde es nur schlimmer machen.";
+    if (co2Soft || vocSoft) s += " CO2/VOC sind auch leicht erhoeht, aber dafuer lohnt sich's gerade nicht.";
+    return { "Feucht, aber warten", s };
+  }
+
+  // 3) Worth a short airing: soft CO2/VOC rise, or humidity that outside air can genuinely fix (or
+  //    where outdoor humidity is unknown, so it can't be ruled out).
+  if (co2Soft || vocSoft || (humid && (!absHumidityKnown || outdoorDrier))) {
+    String s;
+    if (humid && absHumidityKnown && outdoorDrier) {
+      s = "Luftfeuchtigkeit " + String(r.humidity) + "% - draussen ist es absolut trockener, kurz lueften hilft.";
+    } else if (humid) {
+      s = "Luftfeuchtigkeit ueber " + String(HUMIDITY_HIGH) + "% - kurz stosslueften.";
+    } else if (co2Soft && vocSoft) {
+      s = "CO2 und VOC leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+    } else if (co2Soft) {
+      s = "CO2 leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+    } else {
+      s = "VOC leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+    }
     return { "Bald lueften", s };
   }
   return { "Alles gut", "Luft im Zimmer ist fuer die Nacht in Ordnung." };
@@ -226,25 +291,29 @@ void draw(const Reading& r, const Verdict& v) {
   epaper.setTextDatum(TR_DATUM);
   epaper.drawString(r.timeOk ? String(r.clock) : "--:--", W - MARGIN, 40);
 
-  // Verdict: black box, white text, left-aligned inside it — same as the approved preview.
-  // Box is taller than the original preview (248 vs 208) to fit the sub-text at double size —
-  // the first upload's 26px sub-text read as far too small next to the 52px headline.
-  const int boxX = MARGIN, boxY = 112, boxW = CONTENT_W, boxH = 248;
+  // Verdict: black box, white text, left-aligned inside it — matches Markus's design mockup
+  // (bold ALL-CAPS headline, up to 3 lines of matching-scale sub-text below it). Box is taller
+  // than the two-line version (264 vs 248) to fit a third sub-text line without crowding the
+  // footer — footY below is computed from boxH, so it always clears it automatically.
+  const int boxX = MARGIN, boxY = 112, boxW = CONTENT_W, boxH = 264;
   epaper.fillRect(boxX, boxY, boxW, boxH, TFT_BLACK);
   epaper.setTextColor(TFT_WHITE, TFT_BLACK);
   epaper.setTextDatum(TL_DATUM);
   epaper.setTextFont(4);
   epaper.setTextSize(2);
-  epaper.drawString(v.lead, boxX + 32, boxY + 24);
+  String leadUpper = String(v.lead);
+  leadUpper.toUpperCase();
+  epaper.drawString(leadUpper, boxX + 32, boxY + 24);
 
-  // Sub-text at the same 2x scale as the headline (52px) — wrapText measures at that scale too
-  // (passing textSize 2 via a temporary bump), so wrapping matches what actually gets drawn.
+  // Sub-text at the same 2x scale as the headline (52px), up to 3 lines — wrapText measures at
+  // that scale too (passing textSize 2 via a temporary bump), so wrapping matches what actually
+  // gets drawn. Tighter line pitch (54 vs the 2-line version's 60) so 3 lines still fit boxH.
   epaper.setTextFont(4);
-  String subLines[2];
-  int nLines = wrapText(v.sub, boxW - 64, 4, subLines, 2, 2);
+  String subLines[3];
+  int nLines = wrapText(v.sub, boxW - 64, 4, subLines, 3, 2);
   for (int i = 0; i < nLines; i++) {
     epaper.setTextSize(2);
-    epaper.drawString(subLines[i], boxX + 32, boxY + 118 + i * 60);
+    epaper.drawString(subLines[i], boxX + 32, boxY + 96 + i * 54);
   }
   epaper.setTextSize(1);
 
