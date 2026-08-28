@@ -34,6 +34,15 @@ bool sen54Running = false;
 uint32_t sen54BurstStart = 0;
 uint32_t lastPostMs = 0;
 
+// The SEN54's on-chip VOC index algorithm resets to its initial ("still learning", reports 0)
+// state every time measurement is stopped and restarted — confirmed in Sensirion's own library
+// docs: "stopping and restarting the measure mode will reset the state to initial values." In
+// intermittent mode we stop after every single burst, so without saving/restoring this state the
+// index would never leave 0. Carried in RAM across bursts (not across a reboot — that's fine, it
+// just re-learns from scratch after a power cycle, same as day one).
+uint8_t vocAlgState[8] = {0};
+bool vocAlgStateValid = false;
+
 // ── Wi-Fi ────────────────────────────────────────────────────────────────────
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
@@ -115,11 +124,17 @@ void serviceSen54Burst() {
   uint32_t now = millis();
   if (!sen54Running) {
     if (now - latest.pmAge >= (uint32_t)SEN54_BURST_MINUTES * 60000UL || latest.pmAge == 0) {
+      // Restore the learned VOC state BEFORE starting — setVocAlgorithmState only takes effect in
+      // idle mode and is applied once when the next measurement starts (Sensirion's own docs).
+      if (vocAlgStateValid) sen5x.setVocAlgorithmState(vocAlgState, 8);
       sen5x.startMeasurement(); sen54Running = true; sen54BurstStart = now;
       Serial.println("SEN54: fan burst started");
     }
   } else if (now - sen54BurstStart >= (uint32_t)SEN54_WARMUP_SECONDS * 1000UL) {
     readSen5x();
+    // Save the state BEFORE stopping, so the next burst can resume instead of relearning from 0.
+    sen5x.getVocAlgorithmState(vocAlgState, 8);
+    vocAlgStateValid = true;
     sen5x.stopMeasurement(); sen54Running = false;
     Serial.println("SEN54: sampled, fan stopped");
   }
