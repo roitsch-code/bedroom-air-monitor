@@ -30,18 +30,15 @@ struct Reading {
   uint32_t co2Age = 0, pmAge = 0;           // millis() of last successful read
 } latest;
 
-bool sen54Running = false;
-uint32_t sen54BurstStart = 0;
+// SEN54 fan state. The gas (VOC) sensor is ALWAYS running — either in full Measurement mode
+// (fan on, sampling dust) or in RHT/Gas-Only mode (fan off, but VOC/NOx/RHT keep measuring). We
+// only duty-cycle the *fan*, never the whole sensor. This is Sensirion's own reduced-power design
+// ("Reduced Power Operation for SEN5x") and the reason VOC works: the earlier code dropped the
+// sensor to Idle between bursts, which powers the gas sensor OFF, so the VOC index — which adapts
+// over hours — could never leave 0. Fan off = quiet in the bedroom; VOC alive = actually useful.
+bool sen54FanOn = false;
+uint32_t sen54FanStart = 0;
 uint32_t lastPostMs = 0;
-
-// The SEN54's on-chip VOC index algorithm resets to its initial ("still learning", reports 0)
-// state every time measurement is stopped and restarted — confirmed in Sensirion's own library
-// docs: "stopping and restarting the measure mode will reset the state to initial values." In
-// intermittent mode we stop after every single burst, so without saving/restoring this state the
-// index would never leave 0. Carried in RAM across bursts (not across a reboot — that's fine, it
-// just re-learns from scratch after a power cycle, same as day one).
-uint8_t vocAlgState[8] = {0};
-bool vocAlgStateValid = false;
 
 // ── Wi-Fi ────────────────────────────────────────────────────────────────────
 void connectWiFi() {
@@ -97,10 +94,10 @@ void startSensors() {
   sen5x.begin(Wire1);
   sen5x.deviceReset();
   sen5x.setTemperatureOffsetSimple(0.0f);          // we take temp/RH from the SCD-41, not this one
-#if !SEN54_INTERMITTENT
-  sen5x.startMeasurement();                         // continuous: fan always on
-  sen54Running = true;
-#endif
+  // Start with a full-measurement fan burst either way, so PM is available quickly. In intermittent
+  // mode serviceSen54() drops the fan to gas-only after warmup; in continuous mode it stays on.
+  sen5x.startMeasurement();
+  sen54FanOn = true; sen54FanStart = millis();
 }
 
 void readScd4x() {
@@ -111,38 +108,39 @@ void readScd4x() {
   latest.co2 = co2; latest.tempC = t; latest.rh = rh; latest.co2Age = millis();
 }
 
-void readSen5x() {
+// Read the SEN54. VOC is always accepted (it runs continuously, even in gas-only mode). PM is only
+// accepted when acceptPm is true — i.e. once per fan burst, after the fan has warmed up — so the
+// unstable readings during fan spin-up never reach the display. In gas-only mode pm25 comes back
+// NAN anyway (fan off), so it's never overwritten there.
+void readSen5x(bool acceptPm) {
   float pm1, pm25, pm4, pm10, humidity, temp, voc, nox;
   if (sen5x.readMeasuredValues(pm1, pm25, pm4, pm10, humidity, temp, voc, nox) != 0) return;
-  if (!isnan(pm25)) { latest.pm25 = pm25; latest.pmAge = millis(); }
-  if (!isnan(voc))  latest.voc = voc;
+  if (acceptPm && !isnan(pm25)) { latest.pm25 = pm25; latest.pmAge = millis(); }
+  if (!isnan(voc)) latest.voc = voc;
 }
 
-// Intermittent dust sampling: spin the fan up, let it stabilise, read once, spin it down.
-void serviceSen54Burst() {
+// Intermittent DUST sampling — the fan (and only the fan) is duty-cycled. Between bursts the sensor
+// sits in RHT/Gas-Only mode: fan off (quiet), but the VOC gas sensor keeps running so its index
+// stays alive and keeps adapting. Every SEN54_BURST_MINUTES we spin the fan up for a fresh PM.
+void serviceSen54() {
 #if SEN54_INTERMITTENT
   uint32_t now = millis();
-  if (!sen54Running) {
+  if (sen54FanOn) {
+    // Fan running (full Measurement). Once it's warmed up, grab one PM reading, then drop the fan
+    // back down to gas-only — WITHOUT stopping the gas sensor (that's what keeps VOC alive).
+    if (now - sen54FanStart >= (uint32_t)SEN54_WARMUP_SECONDS * 1000UL) {
+      readSen5x(true);                   // capture the settled PM value (and VOC)
+      sen5x.startMeasurementWithoutPm(); // fan OFF, VOC/RHT keep running -> quiet + index stays alive
+      sen54FanOn = false;
+      Serial.println("SEN54: PM sampled, fan off (gas-only continues, VOC keeps running)");
+    }
+  } else {
+    // Gas-only mode (VOC live). Time for a fresh dust reading? Spin the fan up.
     if (now - latest.pmAge >= (uint32_t)SEN54_BURST_MINUTES * 60000UL || latest.pmAge == 0) {
-      // Restore the learned VOC state BEFORE starting — setVocAlgorithmState only takes effect in
-      // idle mode and is applied once when the next measurement starts (Sensirion's own docs).
-      // Logged, not silently ignored (§9) — a failed restore would look identical to "still
-      // learning" from the outside, and that's exactly the bug we're chasing.
-      if (vocAlgStateValid) {
-        uint16_t err = sen5x.setVocAlgorithmState(vocAlgState, 8);
-        Serial.print("SEN54: VOC state restore -> "); Serial.println(err == 0 ? "ok" : String("ERROR " + String(err)));
-      }
-      sen5x.startMeasurement(); sen54Running = true; sen54BurstStart = now;
+      sen5x.startMeasurement();          // fan ON
+      sen54FanOn = true; sen54FanStart = now;
       Serial.println("SEN54: fan burst started");
     }
-  } else if (now - sen54BurstStart >= (uint32_t)SEN54_WARMUP_SECONDS * 1000UL) {
-    readSen5x();
-    // Save the state BEFORE stopping, so the next burst can resume instead of relearning from 0.
-    uint16_t err = sen5x.getVocAlgorithmState(vocAlgState, 8);
-    if (err == 0) vocAlgStateValid = true;
-    Serial.print("SEN54: VOC state save -> "); Serial.println(err == 0 ? "ok" : String("ERROR " + String(err)));
-    sen5x.stopMeasurement(); sen54Running = false;
-    Serial.println("SEN54: sampled, fan stopped");
   }
 #endif
 }
@@ -181,10 +179,19 @@ void loop() {
 
   static uint32_t lastScd = 0;
   if (millis() - lastScd >= 5000) { lastScd = millis(); readScd4x(); }
-#if !SEN54_INTERMITTENT
+
+  // Read the SEN54 every 5 s. In intermittent mode VOC runs continuously (gas-only between bursts),
+  // so we always poll it for VOC — but only accept PM during a warmed-up fan burst (serviceSen54
+  // owns the fan timing). In continuous mode the fan is always on, so PM is accepted too.
   static uint32_t lastPm = 0;
-  if (millis() - lastPm >= 5000) { lastPm = millis(); readSen5x(); }
+  if (millis() - lastPm >= 5000) {
+    lastPm = millis();
+#if SEN54_INTERMITTENT
+    readSen5x(false);   // VOC every cycle; PM captured per-burst inside serviceSen54()
+#else
+    readSen5x(true);
 #endif
-  serviceSen54Burst();
+  }
+  serviceSen54();
   maybePost();
 }
