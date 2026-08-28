@@ -57,7 +57,11 @@ struct Reading {
 // defined if it stayed down near decideAiring() — and a prototype returning an unknown type fails
 // to compile ("'Verdict' does not name a type"). Any type used in a function signature has to be
 // defined up here, above every function.
-struct Verdict { const char* lead; String sub; };
+// action = there is something to do right now (open the window). Drawn as a bold BLACK box with
+// white text — the attention state. When false (nothing to do: all good, wait, or no data) the
+// card is a LIGHT-GREY box with black text — calm, not an alert. This matches Markus's mockups
+// exactly: "BALD LUEFTEN" is the black box, "ALLES FEIN" is the light-grey box.
+struct Verdict { const char* lead; String sub; bool action; };
 
 // ── Wi-Fi ────────────────────────────────────────────────────────────────────
 void connectWiFi() {
@@ -154,7 +158,7 @@ float absoluteHumidity(float tempC, float rh) {
 
 Verdict decideAiring(const Reading& r) {
   if (!r.sensorOk || r.co2 < 0) {
-    return { "Keine Daten", "Sensor gerade nicht erreichbar." };
+    return { "Keine Daten", "Sensor gerade nicht erreichbar.", false };
   }
 
   bool co2High = r.co2 >= CO2_AIR_PPM;
@@ -184,7 +188,7 @@ Verdict decideAiring(const Reading& r) {
 
     if (r.outdoorOk && !outdoorCooler && r.outdoorTemp > r.indoorTemp + 1.0f) {
       return { "Noch warten", reason + " - draussen waermer (" + String(r.outdoorTemp, 0) +
-               String((char)176) + "). Warten bis kuehler." };
+               String((char)176) + "). Warten bis kuehler.", false };
     }
     String s = reason + ".";
     if (outdoorCooler) s += " Kuehlt mit.";
@@ -198,7 +202,7 @@ Verdict decideAiring(const Reading& r) {
       }
     }
     s += burst;
-    return { "Fenster auf", s };
+    return { "Fenster auf", s, true };
   }
 
   // 2) Humid indoors, but airing wouldn't actually help right now — the case that started this:
@@ -206,7 +210,7 @@ Verdict decideAiring(const Reading& r) {
   if (humid && absHumidityKnown && !outdoorDrier) {
     String s = "Feuchte " + String(r.humidity) + "% - draussen genauso feucht, warten.";
     if (co2Soft || vocSoft) s += " CO2/VOC leicht erhoeht.";
-    return { "Feucht, aber warten", s };
+    return { "Feucht, aber warten", s, false };
   }
 
   // 3) Worth a short airing: soft CO2/VOC rise, or humidity that outside air can genuinely fix (or
@@ -224,12 +228,24 @@ Verdict decideAiring(const Reading& r) {
     } else {
       s = "VOC leicht erhoeht - kurz lueften.";
     }
-    return { "Bald lueften", s };
+    return { "Bald lueften", s, true };
   }
-  return { "Alles gut", "Luft ist fuer die Nacht in Ordnung." };
+  return { "Alles gut", "Luft ist fuer die Nacht in Ordnung.", false };
 }
 
 // ── Drawing helpers ──────────────────────────────────────────────────────────
+
+// Fills a rectangle with a light-grey appearance on a pure black/white panel, via a sparse dither
+// (one black pixel per 3×3 block ≈ 11% coverage). From normal viewing distance this reads as the
+// light-grey card in Markus's "ALLES FEIN" mockup — the panel has no real grey level, so a fill
+// pattern is the honest way to get one.
+void fillLightGrey(int x, int y, int w, int h) {
+  epaper.fillRect(x, y, w, h, TFT_WHITE);
+  for (int yy = y; yy < y + h; yy++)
+    for (int xx = x; xx < x + w; xx++)
+      if ((xx % 3) == 0 && (yy % 3) == 0)
+        epaper.drawPixel(xx, yy, TFT_BLACK);
+}
 
 // Draws `numPart` centered on centerX, and — if hasDegree — a small hollow circle right after it,
 // so the ° never depends on a font actually containing that glyph.
@@ -310,13 +326,18 @@ void draw(const Reading& r, const Verdict& v) {
   epaper.setTextDatum(TR_DATUM);
   epaper.drawString(r.timeOk ? String(r.clock) : "--:--", W - MARGIN, 40);
 
-  // Verdict: black box, white text, left-aligned inside it — matches Markus's design mockup
-  // (bold ALL-CAPS headline, up to 3 lines of matching-scale sub-text below it). Box is taller
-  // than the two-line version (264 vs 248) to fit a third sub-text line without crowding the
-  // footer — footY below is computed from boxH, so it always clears it automatically.
+  // Verdict card — bold ALL-CAPS headline + up to 3 lines of matching-scale sub-text. Two looks,
+  // exactly like Markus's mockups: an ACTION verdict ("Fenster auf" / "Bald lueften") is a BLACK
+  // box with white text; a nothing-to-do verdict ("Alles gut" / "warten" / "Keine Daten") is a
+  // LIGHT-GREY box with black text. Box is taller (264) so a third sub-text line clears the footer
+  // — footY below is computed from boxH, so it always clears automatically.
   const int boxX = MARGIN, boxY = 112, boxW = CONTENT_W, boxH = 264;
-  epaper.fillRect(boxX, boxY, boxW, boxH, TFT_BLACK);
-  epaper.setTextColor(TFT_WHITE, TFT_BLACK);
+  const uint16_t inkColor = v.action ? TFT_WHITE : TFT_BLACK;   // text color inside the box
+  if (v.action) epaper.fillRect(boxX, boxY, boxW, boxH, TFT_BLACK);
+  else          fillLightGrey(boxX, boxY, boxW, boxH);
+  // Transparent text (single-arg) so the black letters sit directly on the grey dither — an opaque
+  // background would paint a white cell behind every glyph and punch holes in the light-grey card.
+  epaper.setTextColor(inkColor);
   epaper.setTextDatum(TL_DATUM);
   epaper.setTextFont(4);
   epaper.setTextSize(2);
@@ -331,6 +352,7 @@ void draw(const Reading& r, const Verdict& v) {
   String subLines[3];
   int nLines = wrapText(v.sub, boxW - 64, 4, subLines, 3, 2);
   for (int i = 0; i < nLines; i++) {
+    epaper.setTextColor(inkColor);
     epaper.setTextSize(2);
     epaper.drawString(subLines[i], boxX + 32, boxY + 96 + i * 54);
   }
