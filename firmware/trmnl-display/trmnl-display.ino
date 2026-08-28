@@ -184,9 +184,10 @@ void drawCenteredWithDegree(const String& numPart, bool hasDegree, int centerX, 
 }
 
 // Very small word-wrap: greedily fills lines up to maxW, returns up to maxLines lines.
-int wrapText(const String& text, int maxW, uint8_t font, String outLines[], int maxLines) {
+int wrapText(const String& text, int maxW, uint8_t font, String outLines[], int maxLines, uint8_t textSize = 1) {
   epaper.setTextFont(font);
-  int lineCount = 0;
+  epaper.setTextSize(textSize);   // textWidth() measures at the currently set size — must match
+  int lineCount = 0;              // what drawString() will actually render, or wrapping is wrong
   String line, word;
   int i = 0, n = text.length();
   while (i <= n && lineCount < maxLines) {
@@ -206,6 +207,7 @@ int wrapText(const String& text, int maxW, uint8_t font, String outLines[], int 
     }
     i++;
   }
+  epaper.setTextSize(1);   // leave text size as we found it — don't leak state to the caller
   return lineCount;
 }
 
@@ -225,21 +227,26 @@ void draw(const Reading& r, const Verdict& v) {
   epaper.drawString(r.timeOk ? String(r.clock) : "--:--", W - MARGIN, 40);
 
   // Verdict: black box, white text, left-aligned inside it — same as the approved preview.
-  const int boxX = MARGIN, boxY = 112, boxW = CONTENT_W, boxH = 208;
+  // Box is taller than the original preview (248 vs 208) to fit the sub-text at double size —
+  // the first upload's 26px sub-text read as far too small next to the 52px headline.
+  const int boxX = MARGIN, boxY = 112, boxW = CONTENT_W, boxH = 248;
   epaper.fillRect(boxX, boxY, boxW, boxH, TFT_BLACK);
   epaper.setTextColor(TFT_WHITE, TFT_BLACK);
   epaper.setTextDatum(TL_DATUM);
   epaper.setTextFont(4);
   epaper.setTextSize(2);
-  epaper.drawString(v.lead, boxX + 32, boxY + 30);
-  epaper.setTextSize(1);
+  epaper.drawString(v.lead, boxX + 32, boxY + 24);
 
+  // Sub-text at the same 2x scale as the headline (52px) — wrapText measures at that scale too
+  // (passing textSize 2 via a temporary bump), so wrapping matches what actually gets drawn.
   epaper.setTextFont(4);
   String subLines[2];
-  int nLines = wrapText(v.sub, boxW - 64, 4, subLines, 2);
+  int nLines = wrapText(v.sub, boxW - 64, 4, subLines, 2, 2);
   for (int i = 0; i < nLines; i++) {
-    epaper.drawString(subLines[i], boxX + 32, boxY + 128 + i * 34);
+    epaper.setTextSize(2);
+    epaper.drawString(subLines[i], boxX + 32, boxY + 118 + i * 60);
   }
+  epaper.setTextSize(1);
 
   // Footer: six equal columns, each centered, one font, no line above it.
   epaper.setTextColor(TFT_BLACK, TFT_WHITE);
