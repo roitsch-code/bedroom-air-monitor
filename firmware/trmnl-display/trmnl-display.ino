@@ -172,25 +172,29 @@ Verdict decideAiring(const Reading& r) {
   bool absHumidityKnown = !isnan(indoorAbs) && !isnan(outdoorAbs);
   bool outdoorDrier = absHumidityKnown && (outdoorAbs < indoorAbs - HUMIDITY_MARGIN_ABS);
 
-  String burst = coldOutside ? " Kurz stosslueften reicht." : "";
+  // Every sentence below is kept short on purpose: at this font scale the box fits 3 lines, roughly
+  // 80-90 characters total — a longer sentence used to just stop mid-word on the real display with
+  // no sign it was cut. wrapText() now backstops that with "...", but the fix that actually matters
+  // is staying short here.
+  String burst = coldOutside ? " Kurz stosslueften." : "";
 
   // 1) Air quality problem — CO2 and/or VOC seriously elevated. Strongest trigger, always wins.
   if (co2High || vocHigh) {
-    String reason = (co2High && vocHigh) ? "CO2 und VOC beide hoch" : (co2High ? "CO2 hoch" : "VOC hoch");
+    String reason = (co2High && vocHigh) ? "CO2+VOC hoch" : (co2High ? "CO2 hoch" : "VOC hoch");
 
     if (r.outdoorOk && !outdoorCooler && r.outdoorTemp > r.indoorTemp + 1.0f) {
-      return { "Noch warten", reason + ", aber draussen waermer (" + String(r.outdoorTemp, 0) +
-               String((char)176) + ") als drinnen - erst wenn's draussen kuehler ist." };
+      return { "Noch warten", reason + " - draussen waermer (" + String(r.outdoorTemp, 0) +
+               String((char)176) + "). Warten bis kuehler." };
     }
     String s = reason + ".";
-    if (outdoorCooler) s += " Draussen ist es kuehler - das lueftet und kuehlt zugleich.";
+    if (outdoorCooler) s += " Kuehlt mit.";
     if (humid) {
       if (!absHumidityKnown) {
-        s += " Feuchte drinnen ebenfalls hoch.";
+        s += " Feuchte auch hoch.";
       } else if (!outdoorDrier) {
-        s += " Feuchte drinnen auch hoch, aber draussen ist die Luft absolut genauso feucht - das senkt nur CO2/VOC, nicht die Feuchte.";
+        s += " Wird dabei nicht trockener.";
       } else {
-        s += " Nebenbei wird's auch trockener drinnen.";
+        s += " Trocknet nebenbei mit.";
       }
     }
     s += burst;
@@ -200,9 +204,8 @@ Verdict decideAiring(const Reading& r) {
   // 2) Humid indoors, but airing wouldn't actually help right now — the case that started this:
   //    raining outside, indoor humidity high, opening the window would only import more moisture.
   if (humid && absHumidityKnown && !outdoorDrier) {
-    String s = "Feuchte drinnen " + String(r.humidity) +
-               "% - draussen ist die Luft absolut genauso feucht oder feuchter, lueften wuerde es nur schlimmer machen.";
-    if (co2Soft || vocSoft) s += " CO2/VOC sind auch leicht erhoeht, aber dafuer lohnt sich's gerade nicht.";
+    String s = "Feuchte " + String(r.humidity) + "% - draussen genauso feucht, warten.";
+    if (co2Soft || vocSoft) s += " CO2/VOC leicht erhoeht.";
     return { "Feucht, aber warten", s };
   }
 
@@ -211,19 +214,19 @@ Verdict decideAiring(const Reading& r) {
   if (co2Soft || vocSoft || (humid && (!absHumidityKnown || outdoorDrier))) {
     String s;
     if (humid && absHumidityKnown && outdoorDrier) {
-      s = "Luftfeuchtigkeit " + String(r.humidity) + "% - draussen ist es absolut trockener, kurz lueften hilft.";
+      s = "Feuchte " + String(r.humidity) + "% - draussen trockener, kurz lueften.";
     } else if (humid) {
-      s = "Luftfeuchtigkeit ueber " + String(HUMIDITY_HIGH) + "% - kurz stosslueften.";
+      s = "Feuchte ueber " + String(HUMIDITY_HIGH) + "% - kurz stosslueften.";
     } else if (co2Soft && vocSoft) {
-      s = "CO2 und VOC leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+      s = "CO2+VOC leicht erhoeht - kurz lueften.";
     } else if (co2Soft) {
-      s = "CO2 leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+      s = "CO2 leicht erhoeht - kurz lueften.";
     } else {
-      s = "VOC leicht erhoeht - eine kurze Lueftung wuerde nicht schaden.";
+      s = "VOC leicht erhoeht - kurz lueften.";
     }
     return { "Bald lueften", s };
   }
-  return { "Alles gut", "Luft im Zimmer ist fuer die Nacht in Ordnung." };
+  return { "Alles gut", "Luft ist fuer die Nacht in Ordnung." };
 }
 
 // ── Drawing helpers ──────────────────────────────────────────────────────────
@@ -248,29 +251,45 @@ void drawCenteredWithDegree(const String& numPart, bool hasDegree, int centerX, 
   }
 }
 
-// Very small word-wrap: greedily fills lines up to maxW, returns up to maxLines lines.
+// Very small word-wrap: greedily fills lines up to maxW, returns up to maxLines lines. If the text
+// doesn't fit, the last line gets "..." appended instead of silently stopping mid-word — a verdict
+// sentence that ran too long once did exactly that on the real display, with no sign it was cut.
+// The real fix is keeping decideAiring()'s sentences short; this is just the backstop.
 int wrapText(const String& text, int maxW, uint8_t font, String outLines[], int maxLines, uint8_t textSize = 1) {
   epaper.setTextFont(font);
   epaper.setTextSize(textSize);   // textWidth() measures at the currently set size — must match
   int lineCount = 0;              // what drawString() will actually render, or wrapping is wrong
   String line, word;
   int i = 0, n = text.length();
-  while (i <= n && lineCount < maxLines) {
+  bool truncated = false;
+  while (i <= n) {
     char c = (i < n) ? text[i] : ' ';
     if (c == ' ' || i == n) {
       String candidate = line.length() ? (line + " " + word) : word;
       if (epaper.textWidth(candidate) > maxW && line.length()) {
+        if (lineCount >= maxLines) { truncated = true; break; }
         outLines[lineCount++] = line;
         line = word;
       } else {
         line = candidate;
       }
       word = "";
-      if (i == n) { if (lineCount < maxLines && line.length()) outLines[lineCount++] = line; break; }
+      if (i == n) {
+        if (line.length()) {
+          if (lineCount >= maxLines) truncated = true;
+          else outLines[lineCount++] = line;
+        }
+        break;
+      }
     } else {
       word += c;
     }
     i++;
+  }
+  if (truncated && lineCount > 0) {
+    String& last = outLines[lineCount - 1];
+    while (last.length() > 0 && epaper.textWidth(last + "...") > maxW) last.remove(last.length() - 1);
+    last += "...";
   }
   epaper.setTextSize(1);   // leave text size as we found it — don't leak state to the caller
   return lineCount;
