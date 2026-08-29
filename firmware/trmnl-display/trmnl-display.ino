@@ -50,7 +50,15 @@ struct Reading {
   float outdoorHumidity = NAN;   // %RH — needed so "air it out" isn't suggested when it's raining
   bool timeOk = false;
   char clock[6] = "--:--";
+  int hour = -1;     // Berlin hour (0-23), -1 until NTP has synced — drives the time-aware verdict
+  int daySeed = 0;   // day of year: the wording rotates day to day but stays stable within a day
 };
+
+// Which part of the day it is — the verdict is framed differently in each (a morning "air is fine
+// for the night" is nonsense; the night must never nag you to open a window). W_DAY is also the
+// safe fallback before NTP has synced. Defined up here for the same reason as Verdict: it appears in
+// a function signature (windowFor), and any such type must be declared above every function.
+enum Win { W_NIGHT, W_MORNING, W_DAY, W_EVENING };
 
 // The airing verdict. Defined here, right next to Reading, on purpose: the Arduino IDE
 // auto-generates function prototypes near the top of the file, before this struct would be
@@ -133,6 +141,8 @@ void fetchTime(Reading& r) {
   if (getLocalTime(&t, 6000)) {
     snprintf(r.clock, sizeof(r.clock), "%02d:%02d", t.tm_hour, t.tm_min);
     r.timeOk = true;
+    r.hour = t.tm_hour;      // drives the time-aware verdict
+    r.daySeed = t.tm_yday;   // rotates the wording once per day
   }
 }
 
@@ -150,16 +160,34 @@ float absoluteHumidity(float tempC, float rh) {
   return 216.7f * ((rh / 100.0f) * satVaporPressure) / (273.15f + tempC);       // g/m³
 }
 
-// ── The airing verdict ────────────────────────────────────────────────────────
-// PLACEHOLDER (see config.h): Markus is designing the real rules himself — this combines CO₂ + VOC
-// + the indoor/outdoor temperature difference + absolute humidity into something sensible until
-// then. Swap the numbers in config.h, or rewrite the body of this one function — nothing else needs
-// to change when the real rules land. (Verdict itself is defined up top, next to Reading.)
+// ── The airing verdict — time-aware + rotating ────────────────────────────────
+// The recommendation is framed by the TIME OF DAY (a morning "air is fine for the night" made no
+// sense — the night is over), and the wording ROTATES day to day so it isn't the same sentence
+// every morning. The rotation is seeded by r.daySeed (day of year): stable within a day, different
+// tomorrow. Thresholds live in config.h (CO2 1000/1400, VOC 150/250, humidity 60 %) — those match
+// the sleep research (sleep starts to suffer around 1000 ppm CO2) and the HealthSync Wall, so all
+// three describe the air the same way. The smart outdoor logic (don't air when it's warmer/wetter
+// outside; short Stosslueften when it's cold) is kept unchanged.
+
+static Win windowFor(int hour) {
+  if (hour < 0)  return W_DAY;        // NTP not synced yet → neutral, no night/morning framing
+  if (hour < 6)  return W_NIGHT;      // 0-6  : asleep — never nag to open a window
+  if (hour < 10) return W_MORNING;    // 6-10 : the night is over, clear its air
+  if (hour < 20) return W_DAY;        // 10-20: ambient "right now"
+  return W_EVENING;                   // 20-24: what you'll sleep in
+}
+// Deterministic pick from a set of phrasings — different each day, stable within a day.
+static const char* pick(const char* const opts[], int n, int seed) {
+  int i = seed % n; if (i < 0) i += n; return opts[i];
+}
 
 Verdict decideAiring(const Reading& r) {
   if (!r.sensorOk || r.co2 < 0) {
     return { "Keine Daten", "Sensor gerade nicht erreichbar.", false };
   }
+
+  Win win = windowFor(r.hour);
+  int seed = r.daySeed;
 
   bool co2High = r.co2 >= CO2_AIR_PPM;
   bool co2Soft = r.co2 >= CO2_SOFT_PPM;
@@ -176,61 +204,102 @@ Verdict decideAiring(const Reading& r) {
   bool absHumidityKnown = !isnan(indoorAbs) && !isnan(outdoorAbs);
   bool outdoorDrier = absHumidityKnown && (outdoorAbs < indoorAbs - HUMIDITY_MARGIN_ABS);
 
-  // Every sentence below is kept short on purpose: at this font scale the box fits 3 lines, roughly
-  // 80-90 characters total — a longer sentence used to just stop mid-word on the real display with
-  // no sign it was cut. wrapText() now backstops that with "...", but the fix that actually matters
-  // is staying short here.
+  // ── NIGHT (0-6): calm, NEVER an action box. No "get up and open the window" at 3 a.m. ──
+  if (win == W_NIGHT) {
+    if (co2High || vocHigh) {
+      static const char* L[] = { "CO2 hoch", "Luft schwer", "Stickig" };
+      static const char* S[] = { "Frueh lueften. Jetzt: schlaf.", "Morgens Fenster auf. Ruhe.", "Klaert sich beim Aufstehen." };
+      return { pick(L, 3, seed), pick(S, 3, seed), false };
+    }
+    if (co2Soft || vocSoft || humid) {
+      static const char* L[] = { "Leicht stickig", "CO2 zieht an", "Etwas erhoeht" };
+      static const char* S[] = { "Nichts zu tun. Ruhe.", "Passt fuers Schlafen.", "Kein Grund aufzustehen." };
+      return { pick(L, 3, seed), pick(S, 3, seed), false };
+    }
+    static const char* L[] = { "Ruhe", "Gute Nacht", "Alles ruhig" };
+    static const char* S[] = { "Luft ist ok. Schlaf gut.", "CO2 niedrig. Gute Nacht.", "Frische Luft, schlaf weiter." };
+    return { pick(L, 3, seed), pick(S, 3, seed), false };
+  }
+
+  // Every sentence is kept short on purpose: at this font scale the box fits ~3 lines.
   String burst = coldOutside ? " Kurz stosslueften." : "";
 
-  // 1) Air quality problem — CO2 and/or VOC seriously elevated. Strongest trigger, always wins.
+  // 1) Air-quality problem — CO2/VOC seriously elevated. Strongest trigger.
   if (co2High || vocHigh) {
     String reason = (co2High && vocHigh) ? "CO2+VOC hoch" : (co2High ? "CO2 hoch" : "VOC hoch");
-
+    // Outside warmer → don't air now (physical, time-independent).
     if (r.outdoorOk && !outdoorCooler && r.outdoorTemp > r.indoorTemp + 1.0f) {
       return { "Noch warten", reason + " - draussen waermer (" + String(r.outdoorTemp, 0) +
                String((char)176) + "). Warten bis kuehler.", false };
     }
-    String s = reason + ".";
+    const char* lead;
+    String pre = "";
+    if (win == W_MORNING) {
+      static const char* L[] = { "Lueften", "Fenster auf", "Jetzt durchlueften" };
+      static const char* P[] = { "Nacht war stickig. ", "Ueber Nacht angestaut. ", "Nachtluft raus. " };
+      lead = pick(L, 3, seed); pre = pick(P, 3, seed);
+    } else if (win == W_EVENING) {
+      static const char* L[] = { "Fenster auf vor dem Schlafen", "Vor dem Schlafen lueften", "Fuer die Nacht lueften" };
+      lead = pick(L, 3, seed);
+    } else {
+      static const char* L[] = { "Fenster auf", "Jetzt lueften", "Durchlueften" };
+      lead = pick(L, 3, seed);
+    }
+    String s = pre + reason + ".";
     if (outdoorCooler) s += " Kuehlt mit.";
     if (humid) {
-      if (!absHumidityKnown) {
-        s += " Feuchte auch hoch.";
-      } else if (!outdoorDrier) {
-        s += " Wird dabei nicht trockener.";
-      } else {
-        s += " Trocknet nebenbei mit.";
-      }
+      if (!absHumidityKnown)  s += " Feuchte auch hoch.";
+      else if (!outdoorDrier) s += " Wird nicht trockener.";
+      else                    s += " Trocknet mit.";
     }
     s += burst;
-    return { "Fenster auf", s, true };
+    return { lead, s, true };
   }
 
-  // 2) Humid indoors, but airing wouldn't actually help right now — the case that started this:
-  //    raining outside, indoor humidity high, opening the window would only import more moisture.
+  // 2) Humid indoors, but airing wouldn't help right now (raining/humid outside).
   if (humid && absHumidityKnown && !outdoorDrier) {
     String s = "Feuchte " + String(r.humidity) + "% - draussen genauso feucht, warten.";
     if (co2Soft || vocSoft) s += " CO2/VOC leicht erhoeht.";
     return { "Feucht, aber warten", s, false };
   }
 
-  // 3) Worth a short airing: soft CO2/VOC rise, or humidity that outside air can genuinely fix (or
-  //    where outdoor humidity is unknown, so it can't be ruled out).
+  // 3) Soft rise — a quick airing helps.
   if (co2Soft || vocSoft || (humid && (!absHumidityKnown || outdoorDrier))) {
-    String s;
-    if (humid && absHumidityKnown && outdoorDrier) {
-      s = "Feuchte " + String(r.humidity) + "% - draussen trockener, kurz lueften.";
-    } else if (humid) {
-      s = "Feuchte ueber " + String(HUMIDITY_HIGH) + "% - kurz stosslueften.";
-    } else if (co2Soft && vocSoft) {
-      s = "CO2+VOC leicht erhoeht - kurz lueften.";
-    } else if (co2Soft) {
-      s = "CO2 leicht erhoeht - kurz lueften.";
+    const char* lead;
+    if (win == W_MORNING) {
+      static const char* L[] = { "Kurz durchlueften", "Einmal stosslueften", "Morgens kurz lueften" };
+      lead = pick(L, 3, seed);
+    } else if (win == W_EVENING) {
+      static const char* L[] = { "Vor dem Bett kurz lueften", "Kurz lueften vor dem Schlafen" };
+      lead = pick(L, 2, seed);
     } else {
-      s = "VOC leicht erhoeht - kurz lueften.";
+      static const char* L[] = { "Kurz lueften", "Fenster kurz auf", "Einmal stosslueften" };
+      lead = pick(L, 3, seed);
     }
-    return { "Bald lueften", s, true };
+    String s;
+    if (humid && absHumidityKnown && outdoorDrier) s = "Feuchte " + String(r.humidity) + "% - draussen trockener, kurz lueften.";
+    else if (humid)              s = "Feuchte ueber " + String(HUMIDITY_HIGH) + "% - kurz stosslueften.";
+    else if (co2Soft && vocSoft) s = "CO2+VOC leicht erhoeht.";
+    else if (co2Soft)            s = "CO2 leicht erhoeht.";
+    else                         s = "VOC leicht erhoeht.";
+    s += burst;
+    return { lead, s, true };
   }
-  return { "Alles gut", "Luft ist fuer die Nacht in Ordnung.", false };
+
+  // 4) Fine — fresh air, framed by time of day (never "for the night" in the morning).
+  if (win == W_MORNING) {
+    static const char* L[] = { "Frische Luft", "Gut durchgeatmet", "Morgens frisch" };
+    static const char* S[] = { "Gut geschlafen - Luft war ok.", "CO2 niedrig, saubere Nacht.", "Nichts zu tun heute frueh." };
+    return { pick(L, 3, seed), pick(S, 3, seed), false };
+  }
+  if (win == W_EVENING) {
+    static const char* L[] = { "Gute Luft fuer die Nacht", "Frisch zum Einschlafen", "Bereit fuers Bett" };
+    static const char* S[] = { "Frisch genug zum Schlafen.", "So kannst du einschlafen.", "Gute Basis fuer die Nacht." };
+    return { pick(L, 3, seed), pick(S, 3, seed), false };
+  }
+  static const char* L[] = { "Luft ist frisch", "Alles gut", "Saubere Luft" };
+  static const char* S[] = { "CO2 im gruenen Bereich.", "Nichts zu tun.", "Passt.", "Luft ist sauber." };
+  return { pick(L, 4, seed), pick(S, 4, seed), false };
 }
 
 // ── Drawing helpers ──────────────────────────────────────────────────────────
@@ -391,8 +460,13 @@ void draw(const Reading& r, const Verdict& v) {
   epaper.update();
 }
 
-void sleep() {
-  esp_sleep_enable_timer_wakeup((uint64_t)REFRESH_MINUTES * 60ULL * 1000000ULL);
+void deepSleepFor(int hour) {
+  // At night nobody is looking, and a full e-ink refresh FLASHES black/white — visible and annoying
+  // in a dark bedroom. So between roughly midnight and 6 a.m. we sleep long (the panel just holds its
+  // calm night image) instead of blinking every REFRESH_MINUTES. Outside that, the normal cadence.
+  // hour < 0 (NTP not synced) → normal cadence, so a never-synced clock can't freeze the display.
+  uint32_t minutes = (hour >= 0 && hour < 6) ? 60 : REFRESH_MINUTES;
+  esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60ULL * 1000000ULL);
   esp_deep_sleep_start();
 }
 
@@ -415,7 +489,7 @@ void setup() {
   draw(r, v);
 #endif
 
-  sleep();   // deep sleep until the next refresh; setup() runs again on wake
+  deepSleepFor(r.hour);   // deep sleep until the next refresh (longer at night); setup() runs again on wake
 }
 
 void loop() { /* never reached — the device deep-sleeps out of setup() */ }
