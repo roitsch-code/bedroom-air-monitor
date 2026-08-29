@@ -14,6 +14,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <SensirionI2cScd4x.h>
 #include <SensirionI2CSen5x.h>
@@ -146,19 +147,39 @@ void serviceSen54() {
 }
 
 // ── Optional logging POST ────────────────────────────────────────────────────
+// Posts one reading to POST_URL. The FIRST post fires shortly after boot (once the sensors have
+// warmed up and have real values), then every POST_MINUTES — so you don't wait five blind minutes
+// after an upload to know whether logging works.
+//
+// Handles BOTH schemes. An https:// URL (e.g. the HealthSync server on Hetzner) goes over TLS via
+// WiFiClientSecure — and note the client is declared at FUNCTION scope, not inside the `if` block:
+// HTTPClient keeps a reference to it for the whole request, so if it went out of scope before
+// http.POST() the body would be lost and the server would reject an empty request (a 400 that never
+// reaches the app). setInsecure() skips cert pinning, fine here (your own EU server, air data only,
+// exactly like fetchOutdoor() in the display sketch). A plain http:// URL (a LAN relay) uses the
+// direct path. Leave POST_URL empty in config.h to disable logging.
 void maybePost() {
   if (strlen(POST_URL) == 0) return;
   uint32_t now = millis();
-  if (now - lastPostMs < (uint32_t)POST_MINUTES * 60000UL) return;
+  bool due = (lastPostMs == 0)
+    ? (now >= (uint32_t)SEN54_WARMUP_SECONDS * 1000UL + 5000UL)   // first post: ~5 s after warmup
+    : (now - lastPostMs >= (uint32_t)POST_MINUTES * 60000UL);     // then every POST_MINUTES
+  if (!due) return;
+  if (WiFi.status() != WL_CONNECTED) return;   // not connected yet → retry next loop, don't burn the slot
   lastPostMs = now;
-  if (WiFi.status() != WL_CONNECTED) return;
 
+  WiFiClientSecure secure;   // MUST live until http.end() — declared here, not inside the if
   HTTPClient http;
-  http.begin(POST_URL);
+  if (strncmp(POST_URL, "https", 5) == 0) {
+    secure.setInsecure();              // no cert pinning — your own EU server, air data only
+    http.begin(secure, POST_URL);
+  } else {
+    http.begin(POST_URL);              // plain HTTP (a LAN relay)
+  }
   http.addHeader("Content-Type", "application/json");
   if (strlen(POST_SECRET) > 0) http.addHeader("x-ingest-secret", POST_SECRET);
   int code = http.POST(readingJson());
-  Serial.print("POST -> "); Serial.println(code);
+  Serial.print("POST -> "); Serial.println(code);   // 200 = stored; 401 = wrong secret; <0 = TLS/Wi-Fi
   http.end();
 }
 
@@ -171,6 +192,8 @@ void setup() {
   server.on("/now", handleNow);
   server.begin();
   Serial.println("HTTP server up on /now");
+  Serial.print("Logging: ");
+  Serial.println(strlen(POST_URL) ? POST_URL : "OFF (POST_URL is empty in config.h)");
 }
 
 void loop() {
